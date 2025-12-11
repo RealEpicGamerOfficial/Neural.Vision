@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neural Vision AI</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- TensorFlow.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <!-- COCO-SSD Model -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+
+        body {
+            font-family: 'JetBrains Mono', monospace;
+            background-color: #050505;
+            color: #e0e0e0;
+            overflow-x: hidden;
+        }
+
+        /* Scanline effect */
+        .scanlines {
+            background: linear-gradient(
+                to bottom,
+                rgba(255,255,255,0),
+                rgba(255,255,255,0) 50%,
+                rgba(0,0,0,0.2) 50%,
+                rgba(0,0,0,0.2)
+            );
+            background-size: 100% 4px;
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        /* HUD Borders */
+        .hud-border {
+            border: 1px solid rgba(0, 255, 255, 0.2);
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.1);
+        }
+
+        /* Night Vision Mode Specifics */
+        .mode-night-vision .video-feed {
+            filter: brightness(200%) contrast(150%) grayscale(100%) sepia(100%) hue-rotate(90deg) saturate(300%);
+        }
+        .mode-night-vision .hud-text { color: #00ff00; }
+        .mode-night-vision .hud-border { border-color: #00ff00; box-shadow: 0 0 10px rgba(0,255,0,0.3); }
+
+        /* Distance Mode Specifics */
+        .mode-distance .video-feed {
+            filter: grayscale(100%) contrast(110%);
+        }
+        .mode-distance .hud-text { color: #facc15; } /* Yellow-400 */
+        .mode-distance .hud-border { border-color: #facc15; }
+
+        /* Time of Flight Mode Specifics (NEW) */
+        .mode-tof .video-feed {
+            filter: hue-rotate(-60deg) saturate(150%) contrast(120%);
+        }
+        .mode-tof .hud-text { color: #c084fc; } /* Violet-400 */
+        .mode-tof .hud-border { border-color: #c084fc; box-shadow: 0 0 10px rgba(192, 132, 252, 0.3); }
+
+        /* Live View Mode Specifics */
+        .mode-live .hud-text { color: #00ccff; }
+
+        /* Canvas Overlay */
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 5;
+        }
+        
+        /* Loader Animation */
+        .loader {
+            border-top-color: #3498db;
+            -webkit-animation: spinner 1.5s linear infinite;
+            animation: spinner 1.5s linear infinite;
+        }
+        @keyframes spinner {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .glass-panel {
+            background: rgba(10, 10, 15, 0.85);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+    </style>
+</head>
+<body class="h-screen w-screen flex flex-col mode-live transition-colors duration-500" id="app-body">
+
+    <!-- Top Bar -->
+    <header class="h-16 border-b border-gray-800 flex items-center justify-between px-6 bg-black z-20">
+        <div class="flex items-center gap-2">
+            <i data-lucide="scan-eye" class="text-cyan-400"></i>
+            <h1 class="text-xl font-bold tracking-wider text-cyan-400">NEURAL<span class="text-white">VISION</span></h1>
+        </div>
+        <div class="flex items-center gap-4 text-xs text-gray-400">
+            <div id="fps-counter" class="hidden md:block">FPS: <span class="text-white">0</span></div>
+            <div id="obj-counter" class="hidden md:block">OBJECTS: <span class="text-white">0</span></div>
+            <div class="flex items-center gap-1">
+                <div id="status-dot" class="w-2 h-2 rounded-full bg-red-500"></div>
+                <span id="status-text">OFFLINE</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-1 flex flex-col md:flex-row overflow-hidden relative">
+        
+        <!-- Camera Viewport -->
+        <div class="relative flex-1 bg-black flex items-center justify-center overflow-hidden group">
+            
+            <!-- Video & Canvas Wrapper -->
+            <div class="relative w-full h-full max-w-4xl max-h-full flex items-center justify-center" id="camera-container">
+                <!-- Placeholder when camera is off -->
+                <div id="placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-gray-600 z-0">
+                    <i data-lucide="camera-off" class="w-16 h-16 mb-4 opacity-50"></i>
+                    <p>Initialize Neural Link to Begin</p>
+                </div>
+
+                <!-- Video Element (Hidden logic, shown via CSS) -->
+                <video id="video" class="video-feed absolute w-full h-full object-contain hidden" playsinline muted></video>
+                
+                <!-- Canvas for Bounding Boxes -->
+                <canvas id="canvas" class="absolute w-full h-full object-contain"></canvas>
+
+                <!-- Scanlines Overlay -->
+                <div class="scanlines opacity-30 pointer-events-none"></div>
+
+                <!-- Model Loading Overlay -->
+                <div id="loading-overlay" class="absolute inset-0 bg-black/80 z-20 hidden flex-col items-center justify-center">
+                    <div class="loader ease-linear rounded-full border-4 border-t-4 border-gray-200 h-12 w-12 mb-4"></div>
+                    <h2 class="text-cyan-400 font-bold animate-pulse">LOADING COCO-SSD MODEL...</h2>
+                    <p class="text-xs text-gray-400 mt-2">Initializing Tensor Operations</p>
+                </div>
+            </div>
+
+            <!-- Floating Mode Label -->
+            <div class="absolute top-4 left-4 z-10">
+                <span id="current-mode-badge" class="px-3 py-1 bg-cyan-900/50 border border-cyan-500 text-cyan-400 text-xs font-bold rounded uppercase backdrop-blur-sm">
+                    Live View
+                </span>
+            </div>
+        </div>
+
+        <!-- Controls Sidebar -->
+        <aside class="w-full md:w-80 glass-panel border-l border-gray-800 p-6 flex flex-col gap-6 z-30">
+            
+            <!-- Power Control -->
+            <div class="flex flex-col gap-2">
+                <h3 class="text-gray-500 text-xs font-bold uppercase tracking-widest">System Power</h3>
+                <button id="toggle-cam-btn" class="w-full py-4 bg-gray-800 hover:bg-gray-700 text-white font-bold rounded border border-gray-600 flex items-center justify-center gap-2 transition-all">
+                    <i data-lucide="power"></i> <span>INITIALIZE CAMERA</span>
+                </button>
+            </div>
+
+            <!-- Model Selection -->
+            <div class="flex flex-col gap-3">
+                <h3 class="text-gray-500 text-xs font-bold uppercase tracking-widest">Vision Modes</h3>
+                
+                <!-- Night Vision -->
+                <button onclick="switchMode('night-vision')" id="btn-night-vision" class="mode-btn relative p-4 rounded border border-gray-700 bg-gray-900/20 text-left hover:bg-green-900/20 transition-all">
+                    <div class="flex justify-between items-start mb-1">
+                        <span class="font-bold text-gray-300 group-hover:text-green-400">NIGHT VISION</span>
+                        <i data-lucide="moon" class="w-4 h-4 text-gray-500"></i>
+                    </div>
+                    <p class="text-[10px] text-gray-500">Light amplification and high-contrast phosphorescence filter.</p>
+                </button>
+
+                <!-- Live View -->
+                <button onclick="switchMode('live')" id="btn-live" class="mode-btn relative p-4 rounded border border-cyan-500/50 bg-cyan-900/20 text-left hover:bg-cyan-900/40 transition-all active-mode">
+                    <div class="flex justify-between items-start mb-1">
+                        <span class="font-bold text-cyan-400">LIVE VIEW</span>
+                        <i data-lucide="video" class="w-4 h-4 text-cyan-400"></i>
+                    </div>
+                    <p class="text-[10px] text-gray-400">Standard optical feed with balanced object recognition algorithms.</p>
+                </button>
+
+                <!-- Distance Mapping -->
+                <button onclick="switchMode('distance')" id="btn-distance" class="mode-btn relative p-4 rounded border border-gray-700 bg-gray-900/20 text-left hover:bg-yellow-900/20 transition-all">
+                    <div class="flex justify-between items-start mb-1">
+                        <span class="font-bold text-gray-300 group-hover:text-yellow-400">DISTANCE MAP</span>
+                        <i data-lucide="ruler" class="w-4 h-4 text-gray-500"></i>
+                    </div>
+                    <p class="text-[10px] text-gray-500">Proximity estimation based on object scale. Depth heatmap simulation.</p>
+                </button>
+
+                <!-- Time of Flight -->
+                <button onclick="switchMode('tof')" id="btn-tof" class="mode-btn relative p-4 rounded border border-gray-700 bg-gray-900/20 text-left hover:bg-violet-900/20 transition-all">
+                    <div class="flex justify-between items-start mb-1">
+                        <span class="font-bold text-gray-300 group-hover:text-violet-400">TIME OF FLIGHT</span>
+                        <i data-lucide="scan" class="w-4 h-4 text-gray-500"></i>
+                    </div>
+                    <p class="text-[10px] text-gray-500">Simulated depth sensing via pulsed signal analysis (color-coded proximity).</p>
+                </button>
+            </div>
+
+            <!-- Telemetry / Console -->
+            <div class="flex-1 flex flex-col gap-2 min-h-[150px]">
+                <h3 class="text-gray-500 text-xs font-bold uppercase tracking-widest">System Logs</h3>
+                <div id="console-log" class="flex-1 bg-black border border-gray-800 rounded p-2 text-[10px] font-mono text-green-500 overflow-y-auto font-thin">
+                    <div class="opacity-50">> System Ready...</div>
+                    <div class="opacity-50">> Waiting for input...</div>
+                </div>
+            </div>
+
+        </aside>
+    </main>
+
+    <script>
+        // Initialize Icons
+        lucide.createIcons();
+
+        // DOM Elements
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const toggleBtn = document.getElementById('toggle-cam-btn');
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const consoleLog = document.getElementById('console-log');
+        const fpsCounter = document.querySelector('#fps-counter span');
+        const objCounter = document.querySelector('#obj-counter span');
+        const appBody = document.getElementById('app-body');
+        const modeBadge = document.getElementById('current-mode-badge');
+
+        // State
+        let model = null;
+        let isStreaming = false;
+        let currentMode = 'live'; 
+        let animationId = null;
+        let lastFrameTime = 0;
+        
+        // Mode Configurations
+        const CONFIG = {
+            'live': {
+                threshold: 0.5,
+                color: '#00ccff', // Cyan
+                badgeText: 'Live Feed',
+                borderColor: 'border-cyan-500',
+                textColor: 'text-cyan-400',
+                bgColor: 'bg-cyan-900/20'
+            },
+            'night-vision': {
+                threshold: 0.4, 
+                color: '#00ff00', // Green
+                badgeText: 'NVG Active',
+                borderColor: 'border-green-500',
+                textColor: 'text-green-400',
+                bgColor: 'bg-green-900/20'
+            },
+            'distance': {
+                threshold: 0.6, 
+                color: '#facc15', // Yellow
+                badgeText: 'Distance Scan',
+                borderColor: 'border-yellow-500',
+                textColor: 'text-yellow-400',
+                bgColor: 'bg-yellow-900/20'
+            },
+            'tof': { // NEW TIME OF FLIGHT MODE
+                threshold: 0.65, 
+                color: '#8b5cf6', // Violet-500
+                badgeText: 'ToF Active',
+                borderColor: 'border-violet-500',
+                textColor: 'text-violet-400',
+                bgColor: 'bg-violet-900/20'
+            }
+        };
+
+        // Utility: Logger
+        function log(msg, type = 'info') {
+            const div = document.createElement('div');
+            const timestamp = new Date().toLocaleTimeString().split(' ')[0];
+            div.innerHTML = `<span class="opacity-50">[${timestamp}]</span> ${msg}`;
+            if(type === 'warn') div.style.color = 'orange';
+            if(type === 'error') div.style.color = 'red';
+            consoleLog.appendChild(div);
+            consoleLog.scrollTop = consoleLog.scrollHeight;
+        }
+
+        // 1. Initialize Model
+        async function loadModel() {
+            loadingOverlay.classList.remove('hidden');
+            loadingOverlay.classList.add('flex');
+            log('Loading COCO-SSD Model...');
+            try {
+                model = await cocoSsd.load();
+                log('Model Loaded Successfully.', 'success');
+            } catch (err) {
+                log('Failed to load model: ' + err.message, 'error');
+            } finally {
+                loadingOverlay.classList.add('hidden');
+                loadingOverlay.classList.remove('flex');
+            }
+        }
+
+        // 2. Camera Handling
+        async function toggleCamera() {
+            if (isStreaming) {
+                stopCamera();
+            } else {
+                startCamera();
+            }
+        }
+
+        async function startCamera() {
+            if (!model) await loadModel();
+
+            log('Requesting Camera Access...');
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+                    audio: false
+                });
+                video.srcObject = stream;
+                
+                // Wait for video to load data to get dimensions
+                video.onloadedmetadata = () => {
+                    video.play();
+                    isStreaming = true;
+                    updateUIState(true);
+                    resizeCanvas();
+                    requestAnimationFrame(detectFrame);
+                    log('Camera Stream Active.');
+                };
+            } catch (err) {
+                log('Camera Error: ' + err.message, 'error');
+                // Use a modal message instead of alert
+                console.error("Could not access camera. Please ensure permissions are granted.");
+            }
+        }
+
+        function stopCamera() {
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(track => track.stop());
+                video.srcObject = null;
+            }
+            isStreaming = false;
+            cancelAnimationFrame(animationId);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            updateUIState(false);
+            log('Camera Stream Terminated.');
+        }
+
+        function updateUIState(active) {
+            if (active) {
+                video.classList.remove('hidden');
+                document.getElementById('placeholder').classList.add('hidden');
+                toggleBtn.innerHTML = `<i data-lucide="power-off"></i> <span>TERMINATE LINK</span>`;
+                toggleBtn.classList.remove('bg-gray-800', 'hover:bg-gray-700');
+                toggleBtn.classList.add('bg-red-900/50', 'border-red-500', 'text-red-200', 'hover:bg-red-900/70');
+                statusDot.className = "w-2 h-2 rounded-full bg-green-500 animate-pulse";
+                statusText.innerText = "ONLINE";
+                statusText.className = "text-green-500 font-bold";
+                lucide.createIcons();
+            } else {
+                video.classList.add('hidden');
+                document.getElementById('placeholder').classList.remove('hidden');
+                toggleBtn.innerHTML = `<i data-lucide="power"></i> <span>INITIALIZE CAMERA</span>`;
+                toggleBtn.classList.add('bg-gray-800', 'hover:bg-gray-700');
+                toggleBtn.classList.remove('bg-red-900/50', 'border-red-500', 'text-red-200', 'hover:bg-red-900/70');
+                statusDot.className = "w-2 h-2 rounded-full bg-red-500";
+                statusText.innerText = "OFFLINE";
+                statusText.className = "text-gray-500";
+                lucide.createIcons();
+                fpsCounter.innerText = "0";
+                objCounter.innerText = "0";
+            }
+        }
+
+        function resizeCanvas() {
+            // Match canvas to video display size
+            const rect = video.getBoundingClientRect();
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+        }
+
+        // 3. Mode Switching Logic
+        window.switchMode = (mode) => {
+            currentMode = mode;
+            log(`Switched to mode: ${mode.toUpperCase()}`);
+            
+            // UI Updates
+            document.querySelectorAll('.mode-btn').forEach(btn => {
+                // Remove all mode-specific active classes
+                btn.classList.remove('border-cyan-500/50', 'bg-cyan-900/20', 'border-green-500', 'bg-green-900/20', 'border-yellow-500', 'bg-yellow-900/20', 'border-violet-500', 'bg-violet-900/20');
+                // Apply default inactive classes
+                btn.classList.add('border-gray-700', 'bg-gray-900/20');
+
+                const title = btn.querySelector('span');
+                const icon = btn.querySelector('i, svg'); 
+                
+                if (title) {
+                    title.classList.remove('text-cyan-400', 'text-green-400', 'text-yellow-400', 'text-violet-400');
+                    title.classList.add('text-gray-300');
+                }
+                if (icon) {
+                    icon.classList.remove('text-cyan-400', 'text-green-400', 'text-yellow-400', 'text-violet-400');
+                }
+            });
+
+            const activeBtn = document.getElementById(`btn-${mode}`);
+            const config = CONFIG[mode];
+            
+            // Apply Active Styles
+            activeBtn.classList.remove('border-gray-700', 'bg-gray-900/20');
+            activeBtn.classList.add(config.borderColor, config.bgColor);
+            
+            const activeTitle = activeBtn.querySelector('span');
+            const activeIcon = activeBtn.querySelector('i, svg');
+
+            if (activeTitle) {
+                activeTitle.classList.remove('text-gray-300');
+                activeTitle.classList.add(config.textColor);
+            }
+            if (activeIcon) {
+                activeIcon.classList.add(config.textColor);
+            }
+
+            // Update Badge
+            modeBadge.innerText = config.badgeText;
+            modeBadge.className = `px-3 py-1 text-xs font-bold rounded uppercase backdrop-blur-sm transition-all border ${config.bgColor} ${config.borderColor} ${config.textColor}`;
+
+            // Apply Global CSS Class for Filters
+            appBody.className = `h-screen w-screen flex flex-col transition-colors duration-500 mode-${mode}`;
+        };
+
+        // 4. Detection Loop
+        async function detectFrame(timestamp) {
+            if (!isStreaming) return;
+
+            // Calculate FPS
+            if (lastFrameTime !== 0) {
+                const fps = Math.round(1000 / (timestamp - lastFrameTime));
+                fpsCounter.innerText = fps;
+            }
+            lastFrameTime = timestamp;
+
+            // Detect
+            try {
+                // Using TensorFlow for detection
+                const predictions = await model.detect(video);
+                renderPredictions(predictions);
+            } catch (e) {
+                console.error("Detection error:", e);
+            }
+
+            animationId = requestAnimationFrame(detectFrame);
+        }
+
+        function renderPredictions(predictions) {
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            const config = CONFIG[currentMode];
+            let objectCount = 0;
+
+            predictions.forEach(prediction => {
+                // Filter by confidence threshold
+                if (prediction.score < config.threshold) return;
+
+                objectCount++;
+                const [x, y, width, height] = prediction.bbox;
+                
+                let boxColor = config.color;
+                let labelText = `${prediction.class} ${Math.round(prediction.score * 100)}%`;
+
+                // Calculate proximity ratio for depth-based modes
+                const area = (width * height);
+                const totalArea = canvas.width * canvas.height;
+                const ratio = area / totalArea;
+
+                // --- DISTANCE MAPPING LOGIC ---
+                if (currentMode === 'distance') {
+                    // Color based on proximity (Ratio: Larger area = closer)
+                    let proximityLabel = "FAR";
+                    if (ratio > 0.35) {
+                        boxColor = '#ef4444'; // Red-500: CRITICAL
+                        proximityLabel = "CRITICAL";
+                    } else if (ratio > 0.1) {
+                        boxColor = '#f97316'; // Orange-500: NEAR
+                        proximityLabel = "NEAR";
+                    } else {
+                        boxColor = '#3b82f6'; // Blue-500: DISTANT
+                        proximityLabel = "DISTANT";
+                    }
+                    
+                    labelText = `${prediction.class} [${proximityLabel}]`;
+                }
+
+                // --- ToF MAPPING LOGIC (Simulated) ---
+                if (currentMode === 'tof') {
+                    // Normalize ratio to a 0-1 range for a smooth color scale
+                    let normalizedRatio = Math.min(1.0, Math.max(0.0, (ratio - 0.02) / 0.48)); 
+
+                    // Map ratio to Hue (e.g., 270 (Violet/Far/High Time Index) to 0 (Red/Near/Low Time Index))
+                    const hue = 270 - (normalizedRatio * 270);
+                    boxColor = `hsl(${hue}, 100%, 60%)`;
+
+                    // Calculate a simple 'Time Index' inversely related to proximity
+                    const timeIndex = Math.round((1 - normalizedRatio) * 999); 
+                    
+                    labelText = `${prediction.class} | ${timeIndex} µs`; 
+                    
+                    // Draw a solid focus point
+                    ctx.beginPath();
+                    ctx.fillStyle = boxColor;
+                    ctx.arc(x + width/2, y + height/2, 4, 0, 2 * Math.PI);
+                    ctx.fill();
+
+                    // Optional: Draw a pulsing outer ring for close objects (low time index)
+                    if (normalizedRatio > 0.4) {
+                        ctx.beginPath();
+                        ctx.strokeStyle = boxColor;
+                        ctx.lineWidth = 1;
+                        ctx.globalAlpha = 0.5;
+                        ctx.arc(x + width/2, y + height/2, 10, 0, 2 * Math.PI);
+                        ctx.stroke();
+                        ctx.globalAlpha = 1.0;
+                    }
+                }
+
+                // --- DRAW BOUNDING BOX AND LABEL ---
+                
+                // Draw Box
+                ctx.strokeStyle = boxColor;
+                ctx.fillStyle = boxColor;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(x, y, width, height);
+
+                // Draw Corner Accents
+                const lineLen = 10;
+                ctx.lineWidth = 4;
+                ctx.beginPath(); ctx.moveTo(x, y + lineLen); ctx.lineTo(x, y); ctx.lineTo(x + lineLen, y); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(x + width - lineLen, y + height); ctx.lineTo(x + width, y + height); ctx.lineTo(x + width, y + height - lineLen); ctx.stroke();
+                ctx.lineWidth = 2;
+
+                // Draw Label Background
+                const textWidth = ctx.measureText(labelText).width;
+                ctx.globalAlpha = 0.8;
+                ctx.fillRect(x, y - 22, textWidth + 10, 22);
+                ctx.globalAlpha = 1.0;
+                
+                // Draw Label Text
+                ctx.fillStyle = '#000000';
+                ctx.font = 'bold 12px JetBrains Mono';
+                ctx.fillText(labelText, x + 5, y - 7);
+                
+                // Distance Mode: Draw center crosshair per object
+                if (currentMode === 'distance') {
+                    ctx.beginPath();
+                    ctx.fillStyle = boxColor;
+                    ctx.arc(x + width/2, y + height/2, 2, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+            });
+
+            objCounter.innerText = objectCount;
+        }
+
+        // Event Listeners
+        toggleBtn.addEventListener('click', toggleCamera);
+        window.addEventListener('resize', () => {
+            if(isStreaming) resizeCanvas();
+        });
+
+        // Init
+        switchMode('live'); // Set default visual state
+    </script>
+</body>
+</html>
